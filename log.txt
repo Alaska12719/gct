@@ -1,0 +1,14 @@
+train 1 epoch time 0.00572
+Task ======== valid
+==================0 column ==============
+0.0
+==================1 column ==============
+0.09708737864077671
+epoch 1 loss 17.36271, flscore_micro: 0.05102, flscore_macro: 0.04854, flscore_weighted: 0.00495, flscore_samples: 0.05102
+Task ======== test
+==================0 column ==============
+0.0
+==================1 column ==============
+0.07868852459016394
+epoch 1 loss 17.65314, flscore_micro: 0.04096, flscore_macro: 0.03934, flscore_weighted: 0.00322, flscore_samples: 0.04096
+train 2 epoch time 5044.86704

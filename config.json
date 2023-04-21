@@ -1,0 +1,23 @@
+{
+    "input_path": "./data301",
+    "output_path": "./cleandata",
+    "model_dir": "./model",
+    "diagnosis_name": "DIAGNOSIS_202206302206.csv",
+    "orders_name": "ORDERS_202206302206.csv",
+    "encode": "gbk",
+    "model_data_encode": "utf-8",
+    "score": 0.8,
+    "conditions": "['A','C','D','F']",
+    "sample_num": -1,
+    "diag_max_num": 30,
+    "oder_max_num": 337,
+    "diag_voclen": 3917,
+    "order_voclen": 3123,
+    "use_bert": false,
+    "use_prior": false,
+    "num_class": 2,
+    "training": true,
+    "label_key": "label.expired",
+    "use_inf_mask": true,
+    "epoches": 100
+}
