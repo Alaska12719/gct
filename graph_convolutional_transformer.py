@@ -107,7 +107,79 @@ def run_model(task_type, epoch,num_class, dataloader, get_prediction, get_loss, 
         else:
             with torch.no_grad():
                 run_print_result(task_type, epoch,num_class, get_prediction, get_loss, model, feature_embedder, features, linear_net, show_attention, save_dir=save_dir)
+
+
+def run_pretrain_result(task_type, epoch,num_class, get_prediction, get_loss, model, feature_embedder, features, linear_net, show_attention = False, save_dir = "."):
+    logits = get_prediction(
+                model, feature_embedder, features, linear_net, training=False)
+    
+    labels = features['label']
+    true_labels = feature_embedder.lookupLabels(labels)
+    # num_class = linear_net.get_vocab_size()
+    # true_labels = torch.nn.functional.one_hot(true_labels, num_classes=num_class)
+    crossLoss = nn.CrossEntropyLoss().to(device)
+    # softmax = nn.Softmax(dim=1).to(device)
+    loss = crossLoss(logits.float().to(device), true_labels.to(device))
+    if task_type=='train':
+        print('Task ======== ' + str(loss.item()))
+        return loss
+
+def run_prompt_result(task_type, epoch,num_class, get_prediction, get_loss, model, feature_embedder, features, linear_net, show_attention = False, save_dir = ".", prompt_model=None):
+    logits = get_prediction(
+                model, feature_embedder, features, linear_net, prompt_model, training=False)
+    if logits.shape[1] > 1:
+        nn_softmax = nn.Softmax()
+        probs = nn_softmax(logits)
+    else:
+        nn_sigmoid = nn.Sigmoid()
+        probs = nn_sigmoid(logits)
+
+    labels = features['label'].to(device).float()
+    if logits.shape[1] > 1:
+        labels = one_hot(labels, num_class)
+    loss = get_loss(logits, labels, None)
+    out_probs = probs.cpu().detach().numpy()
+    out_labels = np.array(labels.cpu())
+
+    # if task_type != 'prompt_train':
+    
+    if task_type!='prompt_train':
+        print('Task ======== ' + task_type)
+        if logits.shape[1] > 1:
+            out_probs = np.argmax(out_probs,axis=1)
+            out_probs = np.eye(num_class)[out_probs].astype(int)
+            flscore_micro = f1_score(out_labels, out_probs, average='micro')
+            flscore_macro = f1_score(out_labels, out_probs, average='macro')
+            flscore_weighted = f1_score(out_labels, out_probs, average='weighted')
+            flscore_samples = f1_score(out_labels, out_probs, average='samples')
+            for col in range(num_class):
+                prob = out_probs[:,col]
+                true_label = out_labels[:, col]
+                f1 = f1_score(true_label, prob)
+                print('==================' + str(col) + ' column ==============')
+                print(f1)
+            print('epoch %d loss %.5f, flscore_micro: %.5f, flscore_macro: %.5f, flscore_weighted: %.5f, flscore_samples: %.5f' % (
+                epoch + 1, loss, flscore_micro, flscore_macro, flscore_weighted, flscore_samples), flush=True)
+        else:
+            precision, recall, thresholds = precision_recall_curve(out_labels, out_probs)
+            auc_precision_recall = auc(recall, precision)
+            roc_auc = roc_auc_score(out_labels, out_probs)
             
+            print('epoch %d loss %.5f, epoch AUC: %.5f ,AUCPR: %.5f' % (
+                epoch + 1, loss, roc_auc, auc_precision_recall), flush=True)
+    if task_type=='prompt_train':
+        return loss
+
+def pretrian(task_type, epoch,num_class, dataloader, get_prediction, get_loss, optimizer, model, feature_embedder, linear_net, max_epoch = 200, show_attention = False, save_dir='.', prompt_model=None):
+    for (idx, features) in enumerate(dataloader):
+        if task_type == "train":
+            loss = run_pretrain_result(task_type, epoch,num_class, get_prediction, get_loss, model, feature_embedder, features, linear_net)
+        else:
+            loss = run_prompt_result(task_type, epoch,num_class, get_prediction, get_loss, model, feature_embedder, features, linear_net, show_attention, save_dir=save_dir, prompt_model=prompt_model)
+        if task_type == 'train' or task_type == 'prompt_train':
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
 
 def init_embedding_with_bert(id_2_order_dir, id_2_diag_dir):
@@ -202,7 +274,7 @@ def freeze(layer):
 
 
 class GCTDataset(Dataset):
-    def __init__(self, load_path, label, max_num_codes, prior_scalar, vocab_sizes, use_inf_mask, use_attention, encode='gbk'):
+    def __init__(self, load_path, label, max_num_codes, prior_scalar, vocab_sizes, prompt_size, use_inf_mask, use_attention, encode='gbk', task_type='not_pretrain'):
         # self._label = label
         if use_attention:
             load_path = load_path[:-4] + '_' + label + '_attention' + load_path[-4:]
@@ -213,8 +285,10 @@ class GCTDataset(Dataset):
         self._patientId = self._data['patientId'].to_list()
         self._dx_ids = self._data['dx_ids'].to_list()
         self._dx_ints = strs_2_list(self._data['dx_ints'].to_list())
+        self._dx_ints_len = [len(self._dx_ints[i]) for i in range(len(self._dx_ints))]
         self._proc_ids = self._data['proc_ids'].to_list()
         self._proc_ints = strs_2_list(self._data['proc_ints'].to_list())
+        self._proc_ints_len = [len(self._proc_ints[i]) for i in range(len(self._proc_ints))]
         self._prior_indices = list_2_float_tensor(strs_2_list(self._data['prior_indices'].to_list()))
         self._prior_values = list_2_float_tensor(strs_2_list(self._data['prior_values'].to_list()))
         self._dx_mask = torch.ones([len(self._dx_ints), max_num_codes['dx']]).to(device) #max_num_codes
@@ -227,16 +301,36 @@ class GCTDataset(Dataset):
 
         self._dx_num = []
         self._proc_num = []
+        self._label=[]
+        self._task_type = task_type
+        self._vocab_sizes = vocab_sizes
+        # if task_type=='pretrain':
+        #     for i in range(len(self._dx_ints)):
+        #         r = random.randint(0, 1)
+        #         tmp = {}
+        #         if r == 0: 
+        #             mask_idx = random.randint(0, len(self._dx_ints[i]) - 1)
+        #             tmp['idx'] = self._dx_ints[i][mask_idx]
+        #             self._dx_ints[i][mask_idx] = vocab_sizes['dx_ints']
+        #             self._dx_mask[i][mask_idx] = 0
+        #             tmp['type'] = 'dx_ints'
+        #         else:
+        #             mask_idx = random.randint(0, len(self._proc_ints[i]) - 1)
+        #             tmp['idx'] = self._proc_ints[i][mask_idx]
+        #             self._proc_ints[i][mask_idx] = vocab_sizes['proc_ints']
+        #             self._proc_mask[i][mask_idx] = 0
+        #             tmp['type'] = 'proc_ints'
+        #         self._label.append(tmp)
         for i in range(len(self._dx_ints)):
             self._dx_num.append(len(self._dx_ints[i]))
             for j in range(len(self._dx_ints[i]), max_num_codes['dx']):
-                self._dx_ints[i].append(vocab_sizes['dx_ints'])
+                self._dx_ints[i].append(vocab_sizes['dx_ints'] - 1)
                 self._dx_mask[i][j] = 0
             self._dx_ints[i] = torch.tensor(self._dx_ints[i]).to(device)
         for i in range(len(self._proc_ints)):
             self._proc_num.append(len(self._proc_ints[i]))
             for j in range(len(self._proc_ints[i]), max_num_codes['px']):
-                self._proc_ints[i].append(vocab_sizes['proc_ints'])
+                self._proc_ints[i].append(vocab_sizes['proc_ints'] - 1)
                 self._proc_mask[i][j] = 0
             self._proc_ints[i] = torch.tensor(self._proc_ints[i]).to(device)
         row0 = torch.cat([
@@ -293,26 +387,54 @@ class GCTDataset(Dataset):
                 guide = torch.ones(size=guide_init.shape).to(device)
                 self._guide.append(guide)
 
-
-
-
         self._label = self._data[label].to_list()
 
     def __getitem__(self, index):
-        result_dic = {"patientId": self._patientId[index],
-                      "dx_ids": self._dx_ids[index],
-                      "dx_ints": self._dx_ints[index],
-                      "proc_ids": self._proc_ids[index],
-                      "proc_ints": self._proc_ints[index],
-                      "guide": self._guide[index],
-                      "prior_guide": self._prior_guide[index],
-                      "dx_num": self._dx_num[index],
-                      "proc_num": self._proc_num[index],
-                      "mask": {
-                          "dx_ints": self._dx_mask[index],
-                          "proc_ints": self._proc_mask[index]},
-                      "label": self._label[index]}
-        return result_dic
+        with torch.no_grad():
+            result_dic = {"patientId": self._patientId[index],
+                        "dx_ids": self._dx_ids[index],
+                        "dx_ints": self._dx_ints[index],
+                        "proc_ids": self._proc_ids[index],
+                        "proc_ints": self._proc_ints[index],
+                        "guide": self._guide[index],
+                        "prior_guide": self._prior_guide[index],
+                        "dx_num": self._dx_num[index],
+                        "proc_num": self._proc_num[index],
+                        "mask": {
+                            "dx_ints": self._dx_mask[index],
+                            "proc_ints": self._proc_mask[index]},
+                        "label": self._label[index]}
+            if self._task_type=='pretrain':
+                r = random.randint(0, 1)
+                tmp = {}
+                if r == 0: 
+                    mask_idx = random.randint(0, self._dx_ints_len[index] - 1)
+                    tmp['idx'] = self._dx_ints[index][mask_idx].item()
+                    tmp_dx_ints = self._dx_ints[index].clone()
+                    tmp_dx_ints[mask_idx] = self._vocab_sizes['dx_ints'] - 1
+                    result_dic['dx_ints'] = tmp_dx_ints
+                    # self._dx_mask[index][mask_idx] = 0
+                    tmp_dx_mask = self._dx_mask[index].clone()
+                    tmp_dx_mask[mask_idx] = 0
+                    result_dic['mask']['dx_ints'] = tmp_dx_mask
+                    tmp['type'] = 'dx_ints'
+                else:
+                    mask_idx = random.randint(0, self._proc_ints_len[index] - 1)
+                    tmp['idx'] = self._proc_ints[index][mask_idx].item()
+                    # self._proc_ints[index][mask_idx] = self._vocab_sizes['proc_ints'] - 1
+                    tmp_proc_ints = self._proc_ints[index].clone()
+                    tmp_proc_ints[mask_idx] = self._vocab_sizes['proc_ints'] - 1
+                    result_dic['proc_ints'] = tmp_proc_ints
+                    # self._proc_mask[index][mask_idx] = 0
+                    tmp_proc_mask = self._proc_mask[index].clone()
+                    tmp_proc_mask[mask_idx] = 0
+                    result_dic['mask']['proc_ints'] = tmp_proc_mask
+                    tmp['type'] = 'proc_ints'
+                self._label[index] = tmp
+                result_dic['label'] = self._label[index]  # for the case of the first time this method is called.
+
+            
+            return result_dic
 
     def __len__(self):
         return self._data.shape[0]
@@ -324,12 +446,12 @@ class FeatureKeyEmbedding(nn.Module):
         self._use_bert = use_bert
         if self._use_bert:
             dx_emb, treat_emb, bert = init_embedding_with_bert(id_2_order_dir, id_2_diag_dir)
-            emb = nn.Embedding(vocab_sizes['dx_ints'] + 1, 768, padding_idx=vocab_sizes['dx_ints']).to(device)
+            emb = nn.Embedding(vocab_sizes['dx_ints'], 768, padding_idx=vocab_sizes['dx_ints'] - 1).to(device)
             dx_emb = torch.cat((dx_emb, emb.weight[dx_emb.shape[0]:]))
             emb.weight = torch.nn.Parameter(dx_emb)
             self._params.append(emb)
 
-            emb = nn.Embedding(vocab_sizes['proc_ints'] + 1, 768, padding_idx=vocab_sizes['proc_ints']).to(device)
+            emb = nn.Embedding(vocab_sizes['proc_ints'], 768, padding_idx=vocab_sizes['proc_ints'] - 1).to(device)
             treat_emb = torch.cat((treat_emb, emb.weight[treat_emb.shape[0]:]))
             emb.weight = torch.nn.Parameter(treat_emb)
             self._params.append(emb)
@@ -337,12 +459,16 @@ class FeatureKeyEmbedding(nn.Module):
         else:
             for feature_key in feature_keys:
                 vocab_size = vocab_sizes[feature_key]
-                emb = nn.Embedding(vocab_size + 1, embedding_size,  padding_idx=vocab_size)
+                emb = nn.Embedding(vocab_size, embedding_size,  padding_idx=vocab_size - 1)
                 self._params.append(emb)#aplly dummy embedding
+        self._params.append(nn.Embedding(1, embedding_size))
         self._params.append(nn.Embedding(1, embedding_size))
 
     def forward(self, features, str):
-        if str == 'visit':
+        if str == 'predict':
+            x = self._params[3](features)
+            return x
+        elif str == 'visit':
             x = self._params[2](features)
             return x
         elif str == 'dx_ints':
@@ -360,6 +486,40 @@ class LinearNet(nn.Module):
     def forward(self, features):
         x = self._net(features)
         return x
+class MaskLM(nn.Module):
+    def __init__(self,vocab_size, num_inputs=768, **kwargs):
+        super(MaskLM,self).__init__()
+        self._vocab_size =  vocab_size
+        self.dense = nn.Sequential(nn.Linear(num_inputs,num_inputs),
+                                 nn.ReLU(),
+                                 nn.LayerNorm(num_inputs, eps=1e-12))
+        self.decoder = nn.Linear(num_inputs, vocab_size, bias=False)
+        self.decoder.to(device)
+        self.dense.to(device)
+    
+    def get_vocab_size(self):
+        return self._vocab_size
+    
+    def forward(self,X, encode_weight):
+        self.decoder.weight = nn.Parameter(encode_weight)
+        self.decoder.bias = nn.Parameter(torch.zeros(self._vocab_size))
+        self.decoder.to(device)
+        return self.decoder(self.dense(X))
+    
+
+class PromptEmbedding(torch.nn.Module):
+    def __init__(self, prompt_num, embedding_size, dropout_p=0.5):
+        super(PromptEmbedding, self).__init__()
+        self._prompt_num = prompt_num  
+        self._embedding = nn.Embedding(prompt_num + 2, embedding_size,  padding_idx=prompt_num + 1).to(device)
+    
+    def getPromptNum(self):
+        return self._prompt_num
+    
+    def tokenView(self, feature_map, key):
+        feature = feature_map[key]
+        batch_size = feature.shape[0]
+        return self._embedding(torch.tensor([i for i in range(self._prompt_num + 1)]).to(device)).repeat([batch_size, 1, 1]),torch.ones(batch_size, self._prompt_num + 1).to(device)
 
 class FeatureEmbedding(object):
     def __init__(self, vocab_sizes, feature_keys, embedding_size, use_bert = False, id_2_order_dir = '.', id_2_diag_dir = '.'):
@@ -369,6 +529,32 @@ class FeatureEmbedding(object):
         self._embedding_size = embedding_size
 
         self._embed_model = FeatureKeyEmbedding(self._vocab_sizes, self._feature_keys, self._embedding_size, use_bert, id_2_order_dir, id_2_diag_dir).to(device)
+
+    def getPredict(self, feature_map):
+        embeddings = {}
+        masks = {}
+        for key in self._feature_keys:
+          feature = feature_map[key]
+        batch_size = feature.shape[0]
+        embeddings = self._embed_model(torch.tensor(0).to(device), 'predict').reshape(1, self._embedding_size)[None, :, :].repeat(batch_size, 1, 1)
+        masks = torch.ones(batch_size).to(device)[:, None]
+        return embeddings, masks
+    
+    def getEncodeWeight(self):
+        return torch.cat([self._embed_model._params[i].weight for i in range(len(self._embed_model._params))])
+    
+    def lookupLabels(self, labels):
+        res = []
+        for i in range(len(labels['type'])):
+            curNum = 0
+            for key in self._feature_keys:
+                if key != labels['type'][i]:
+                    curNum = curNum + self._vocab_sizes[key]
+                else:
+                    curNum = curNum + labels['idx'][i]
+                    res.append(curNum)
+                    break
+        return torch.stack(res)
 
     def lookup(self, feature_map, max_num_codes):
         """Look-up function.
@@ -714,9 +900,11 @@ class EHRTransformer(object):
 
     def __init__(self,
                gct_params,
+               task_type='fine_tune',
                feature_keys=['dx_ints', 'proc_ints'],
                label_key='label.readmission',
                vocab_sizes={'dx_ints':5000, 'proc_ints':10000},
+               prompt_size=10,
                feature_set='vdp',
                max_num_codes={'dx':31,'px':339},
                prior_scalar=0.5,
@@ -760,6 +948,10 @@ class EHRTransformer(object):
         self._feature_keys = feature_keys
         self._label_key = label_key
         self._vocab_sizes = vocab_sizes
+        self._prompt_size = prompt_size
+        self._task_type = task_type
+        if task_type != 'pretrain' and task_type != 'prompt':
+            self._prompt_size = 0
         self._feature_set = feature_set
         self._max_num_codes = max_num_codes
         self._prior_scalar = prior_scalar
@@ -782,9 +974,10 @@ class EHRTransformer(object):
         self._epoches = epoches
         self._use_attention = use_attention
 
-        self._train_data_set = GCTDataset(self._input_path + '/train.csv', self._label_key, self._max_num_codes, self._prior_scalar, self._vocab_sizes, self._use_inf_mask, use_attention, encode=self._encode)
-        self._valid_data_set = GCTDataset(self._input_path + '/validation.csv', self._label_key, self._max_num_codes, self._prior_scalar, self._vocab_sizes, self._use_inf_mask, use_attention, encode=self._encode)
-        self._test_data_set = GCTDataset(self._input_path + '/test.csv', self._label_key, self._max_num_codes, self._prior_scalar, self._vocab_sizes, self._use_inf_mask, use_attention, encode=self._encode)
+        self._max_num_codes[list(self._max_num_codes.keys())[-1]] = self._max_num_codes[list(self._max_num_codes.keys())[-1]] + prompt_size
+        self._train_data_set = GCTDataset(self._input_path + '/train.csv', self._label_key, self._max_num_codes, self._prior_scalar, self._vocab_sizes, self._prompt_size, self._use_inf_mask, use_attention, encode=self._encode,task_type=self._task_type)
+        self._valid_data_set = GCTDataset(self._input_path + '/validation.csv', self._label_key, self._max_num_codes, self._prior_scalar, self._vocab_sizes, self._prompt_size, self._use_inf_mask, use_attention, encode=self._encode, task_type=self._task_type)
+        self._test_data_set = GCTDataset(self._input_path + '/test.csv', self._label_key, self._max_num_codes, self._prior_scalar, self._vocab_sizes, self._prompt_size, self._use_inf_mask, use_attention, encode=self._encode, task_type=self._task_type)
         self._train_data_loader = DataLoader(self._train_data_set, batch_size=self._batch_size, shuffle=True, num_workers=0)
         self._valid_data_loader = DataLoader(self._valid_data_set, batch_size=self._valid_data_set.__len__(), shuffle=False, num_workers=0)
         self._test_data_loader = DataLoader(self._test_data_set, batch_size=self._test_data_set.__len__(), shuffle=False, num_workers=0)
@@ -834,7 +1027,84 @@ class EHRTransformer(object):
 
 
         return predict_embeddings, mask_diagnoses_embeddings, attentions
+    
+    def prompt_prediction(self, model, feature_embedder, features, linear_net, prompt_model, training=True, model_type='gct'):
+        for i in range(len(self._feature_keys)):
+            if i == len(self._feature_keys) - 1:
+                features[self._feature_keys[i]] = features[self._feature_keys[i]][:,:-10]
+                features['mask'][self._feature_keys[i]] = features['mask'][self._feature_keys[i]][:,:-10]
+        embedding_dict, mask_dict = feature_embedder.lookup(
+            features, self._max_num_codes)
+        pretrain_embedding, pretrain_mask = prompt_model.tokenView(features, self._feature_keys[0])
+        embedding_dict['predict'] = pretrain_embedding
+        mask_dict['predict'] = pretrain_mask
+        # 2. Concatenate embeddings and masks into a single tensor.
+        keys = ['visit', 'predict'] + self._feature_keys
+        embeddings = torch.cat([embedding_dict[key] for key in keys], axis=1)
+        masks = torch.cat([mask_dict[key] for key in keys], axis=1)
 
+        if model_type == 'gct':
+            if self._feature_set == 'vdp':
+                guide, prior_guide = create_matrix_vdp(features, masks, self._use_prior,
+                                                       self._use_inf_mask,
+                                                       self._max_num_codes,
+                                                       self._prior_scalar)
+            else:
+                sys.exit(0)
+
+            # 3. Process embeddings with GCT
+            # s = time.time()
+            hidden, attentions = model(
+                embeddings, masks[:, :, None], guide, prior_guide, training)
+            # e = time.time()
+            # print((e-s)*1000.0)
+
+            # 4. Generate logits
+            pre_logit = hidden[:, 1, :]
+            pre_logit = pre_logit.reshape(-1, self._embedding_size)
+            logits = linear_net(pre_logit)
+            logits = torch.squeeze(logits)
+
+        elif model_type == 'mlp':
+            logits = model(embeddings, training)
+            logits = torch.squeeze(logits)
+            attentions = None
+        return logits
+
+
+    def pretrain_prediction(self, model, feature_embedder, features, linear_net,training=True, model_type='gct'):
+        embedding_dict, mask_dict = feature_embedder.lookup(
+            features, self._max_num_codes)
+        pretrain_embedding, pretrain_mask = feature_embedder.getPredict(
+            features)
+        embedding_dict['predict'] = pretrain_embedding
+        mask_dict['predict'] = pretrain_mask
+        # 2. Concatenate embeddings and masks into a single tensor.
+        keys = ['visit', 'predict'] + self._feature_keys
+        embeddings = torch.cat([embedding_dict[key] for key in keys], axis=1)
+        masks = torch.cat([mask_dict[key] for key in keys], axis=1)
+
+        if model_type == 'gct':
+            if self._feature_set == 'vdp':
+                guide, prior_guide = create_matrix_vdp(features, masks, self._use_prior,
+                                                       self._use_inf_mask,
+                                                       self._max_num_codes,
+                                                       self._prior_scalar)
+            else:
+                sys.exit(0)
+
+            # 3. Process embeddings with GCT
+            # s = time.time()
+            hidden, attentions = model(
+                embeddings, masks[:, :, None], guide, prior_guide, training)
+            # e = time.time()
+            # print((e-s)*1000.0)
+
+            # 4. Generate logits
+            pre_logit = hidden[:, 1, :]
+            
+        return linear_net(pre_logit, feature_embedder.getEncodeWeight())
+    
     def get_prediction(self, model, feature_embedder, features, linear_net, training=False, model_type='gct'):
         """Accepts features and produces logits and attention values.
 
@@ -984,6 +1254,105 @@ class EHRTransformer(object):
     #                     dataFrame.loc[index, 'attention'] = i
     #                 torch.save(attentions[2], self._input_path + '/' + key + '_' + self._label_key + '_attention.pth')
     #                 dataFrame.to_csv(self._input_path + '/' + key + '_' + self._label_key +'_attention.csv')
+    def prompt_train(self, model_path):
+        feature_embedder = FeatureEmbedding(self._vocab_sizes, self._feature_keys, self._embedding_size, self._use_bert, self._id_2_order_dir, self._id_2_diag_dir)
+        linear_net = LinearNet(self._embedding_size, self._num_classes)
+        model = GraphConvolutionalTransformer(**self._gct_params)
+        linear_net = linear_net.to(device)
+        model = model.to(device)
+
+        state_dict = torch.load(model_path + '/pretrain_model.pth')
+        # linear_net.load_state_dict(state_dict['linear_net'])
+        model.load_state_dict(state_dict['model'])
+        feature_embedder._embed_model.load_state_dict(state_dict['feature_embedder._embed_model'])
+        prompt_nodes = PromptEmbedding(self._prompt_size, self._embedding_size)
+        linear_net.train()
+        prompt_nodes.train()
+        feature_embedder._embed_model.eval()
+        model.eval()
+        optimizer = optim.Adam([{"params": linear_net.parameters()},
+                    {"params": prompt_nodes.parameters()}],lr=self._learning_rate, betas=(0.9, 0.999), eps=1e-8)
+        result_epoch = self._epoches
+        starttime = time.time()
+        for epoch in range(result_epoch):
+            if epoch >= 0:# eval
+                endtime = time.time()
+                print('train %d epoch time %.5f' % (
+                    epoch + 1, float(endtime - starttime) * 1000.0), flush=True)
+                linear_net.eval()
+                prompt_nodes.eval()
+                pretrian(task_type = "prompt_valid", epoch = epoch, num_class = self._num_classes,dataloader = self._valid_data_loader, get_prediction=self.prompt_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net, prompt_model=prompt_nodes)
+                pretrian(task_type = "prompt_test", epoch = epoch, num_class = self._num_classes, dataloader = self._test_data_loader,get_prediction=self.prompt_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net, prompt_model=prompt_nodes)
+            linear_net.train()
+            prompt_nodes.train()
+            pretrian(task_type = "prompt_train", epoch = epoch, num_class = self._num_classes, dataloader = self._train_data_loader,get_prediction=self.prompt_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net, max_epoch = result_epoch, prompt_model=prompt_nodes)
+
+    def fine_tune(self, model_path):
+        feature_embedder = FeatureEmbedding(self._vocab_sizes, self._feature_keys, self._embedding_size, self._use_bert, self._id_2_order_dir, self._id_2_diag_dir)
+        linear_net = LinearNet(self._embedding_size, self._num_classes)
+        model = GraphConvolutionalTransformer(**self._gct_params)
+        linear_net = linear_net.to(device)
+        model = model.to(device)
+
+        state_dict = torch.load(model_path + '/pretrain_model.pth')
+        # linear_net.load_state_dict(state_dict['linear_net'])
+        model.load_state_dict(state_dict['model'])
+        feature_embedder._embed_model.load_state_dict(state_dict['feature_embedder._embed_model'])
+        linear_net.train()
+        feature_embedder._embed_model.train()
+        model.train()
+        optimizer = optim.Adam([{"params": linear_net.parameters()},
+                    {"params": model.parameters()},
+                    {"params": feature_embedder._embed_model.parameters()}],lr=self._learning_rate, betas=(0.9, 0.999), eps=1e-8)
+        result_epoch = self._epoches
+        starttime = time.time()
+        for epoch in range(result_epoch):
+            if epoch >= 0:# eval
+                endtime = time.time()
+                linear_net.eval()
+                feature_embedder._embed_model.eval()
+                model.eval()
+                print('train %d epoch time %.5f' % (
+                    epoch + 1, float(endtime - starttime) * 1000.0), flush=True)
+                run_model(task_type = "valid", epoch = epoch, num_class = self._num_classes,dataloader = self._valid_data_loader, get_prediction=self.get_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net)
+
+                run_model(task_type = "test", epoch = epoch, num_class = self._num_classes, dataloader = self._test_data_loader,get_prediction=self.get_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net)
+            linear_net.train()
+            feature_embedder._embed_model.train()
+            model.train()
+            run_model(task_type = "train", epoch = epoch, num_class = self._num_classes, dataloader = self._train_data_loader,get_prediction=self.get_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net, max_epoch = result_epoch)
+
+    def pretrain_train(self, model_path, use_bert=False):
+        feature_embedder = FeatureEmbedding(self._vocab_sizes, self._feature_keys, self._embedding_size, self._use_bert, self._id_2_order_dir, self._id_2_diag_dir)
+        vocab_size = 0
+        for key in self._feature_keys:
+            vocab_size = self._vocab_sizes[key] + vocab_size # NONE SENSE
+        vocab_size = vocab_size + 2 # CLS MASK
+        linear_net = MaskLM(vocab_size, self._embedding_size)
+        model = GraphConvolutionalTransformer(**self._gct_params)
+        linear_net = linear_net.to(device)
+        model = model.to(device)
+
+        optimizer = optim.Adam([{"params": linear_net.parameters()},
+                    {"params": model.parameters()},
+                    {"params": feature_embedder._embed_model.parameters()}],lr=self._learning_rate, betas=(0.9, 0.999), eps=1e-8)
+        linear_net.train()
+        feature_embedder._embed_model.train()
+        model.train()
+        starttime = time.time()
+        result_epoch = self._epoches
+        for epoch in range(result_epoch):
+            linear_net.train()
+            feature_embedder._embed_model.train()
+            model.train()
+            pretrian(task_type = "train", epoch = epoch, num_class = self._num_classes, dataloader = self._train_data_loader,get_prediction=self.pretrain_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net, max_epoch = result_epoch)
+        torch.save({'model': model.state_dict(), "linear_net": linear_net.state_dict(),
+                            "feature_embedder._embed_model": feature_embedder._embed_model.state_dict()},
+                           model_path + '/pretrain_model.pth')
+        return
+        
+        
+
 
     def test(self, model_path, use_bert=False):
         feature_embedder = FeatureEmbedding(self._vocab_sizes, self._feature_keys, self._embedding_size, self._use_bert, self._id_2_order_dir, self._id_2_diag_dir)
@@ -1091,6 +1460,13 @@ class EHRTransformer(object):
                 loss.backward()
                 optimizer.step()
 
+    def run_gct_pretrain(self, model_path, task_type):
+        if task_type == 'pretrain':
+            self.pretrain_train(model_path = model_path, use_bert = self._use_bert)
+        elif task_type == 'prompt':
+            self.prompt_train(model_path = model_path)
+        elif task_type == 'fine_tune':
+            self.fine_tune(model_path=model_path)
     def train_and_pred(self, model_dir, model_type='gct', use_bert=False):
         # data preprocess
 
@@ -1130,7 +1506,9 @@ class EHRTransformer(object):
                 run_model(task_type = "valid", epoch = epoch, num_class = self._num_classes,dataloader = self._valid_data_loader, get_prediction=self.get_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net)
 
                 run_model(task_type = "test", epoch = epoch, num_class = self._num_classes, dataloader = self._test_data_loader,get_prediction=self.get_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net)
-
+            linear_net.train()
+            feature_embedder._embed_model.train()
+            model.train()
             run_model(task_type = "train", epoch = epoch, num_class = self._num_classes, dataloader = self._train_data_loader,get_prediction=self.get_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net, max_epoch = result_epoch)
 
         return

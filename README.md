@@ -56,6 +56,13 @@ python get_best_result.py ./log.txt
 
 便可以打印出日志中验证集flscore_macro最高对应的epoch，以及该epoch对应的test和valid的一些结果。
 
+5.5更新
+在config中加入了prompt_num字段和task_type字段（可选参数为"pretrain", "prompt", "fine_tune），定义prompt的节点数量，pretrain过程也需要定义该参数。
+新的pretrain, prompt, fine_tune方法调用train_pretrain_prompt_finetune.py即可，只需修改config的参数即可完成调用
+建议的组合有pretrain+prompt, pretrain+fine_tune。
+pretrain阶段只打印loss，不使用标签。
+pretrain采用的MLM算法，随机mask掉一些节点来预测。
+
 
 
 
