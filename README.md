@@ -63,6 +63,9 @@ pretrain阶段只打印loss，不使用标签。
 pretrain采用的MLM算法，随机mask掉一些节点来预测。  
 
 
+# 5.11更新
+prompt现在需要先经过fine_tune，之后使用fine_tune的结果完成prompt训练。
+
 
 
 

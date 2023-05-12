@@ -511,7 +511,7 @@ class PromptEmbedding(torch.nn.Module):
     def __init__(self, prompt_num, embedding_size, dropout_p=0.5):
         super(PromptEmbedding, self).__init__()
         self._prompt_num = prompt_num  
-        self._embedding = nn.Embedding(prompt_num + 2, embedding_size,  padding_idx=prompt_num + 1).to(device)
+        self._embedding = nn.Embedding(prompt_num + 1, embedding_size,  padding_idx=prompt_num).to(device)
     
     def getPromptNum(self):
         return self._prompt_num
@@ -519,7 +519,7 @@ class PromptEmbedding(torch.nn.Module):
     def tokenView(self, feature_map, key):
         feature = feature_map[key]
         batch_size = feature.shape[0]
-        return self._embedding(torch.tensor([i for i in range(self._prompt_num + 1)]).to(device)).repeat([batch_size, 1, 1]),torch.ones(batch_size, self._prompt_num + 1).to(device)
+        return self._embedding(torch.tensor([i for i in range(self._prompt_num)]).to(device)).repeat([batch_size, 1, 1]),torch.ones(batch_size, self._prompt_num).to(device)
 
 class FeatureEmbedding(object):
     def __init__(self, vocab_sizes, feature_keys, embedding_size, use_bert = False, id_2_order_dir = '.', id_2_diag_dir = '.'):
@@ -1031,8 +1031,8 @@ class EHRTransformer(object):
     def prompt_prediction(self, model, feature_embedder, features, linear_net, prompt_model, training=True, model_type='gct'):
         for i in range(len(self._feature_keys)):
             if i == len(self._feature_keys) - 1:
-                features[self._feature_keys[i]] = features[self._feature_keys[i]][:,:-10]
-                features['mask'][self._feature_keys[i]] = features['mask'][self._feature_keys[i]][:,:-10]
+                features[self._feature_keys[i]] = features[self._feature_keys[i]][:,:-self._prompt_size]
+                features['mask'][self._feature_keys[i]] = features['mask'][self._feature_keys[i]][:,:-self._prompt_size]
         embedding_dict, mask_dict = feature_embedder.lookup(
             features, self._max_num_codes)
         pretrain_embedding, pretrain_mask = prompt_model.tokenView(features, self._feature_keys[0])
@@ -1060,7 +1060,7 @@ class EHRTransformer(object):
             # print((e-s)*1000.0)
 
             # 4. Generate logits
-            pre_logit = hidden[:, 1, :]
+            pre_logit = hidden[:, 0, :]
             pre_logit = pre_logit.reshape(-1, self._embedding_size)
             logits = linear_net(pre_logit)
             logits = torch.squeeze(logits)
@@ -1073,6 +1073,10 @@ class EHRTransformer(object):
 
 
     def pretrain_prediction(self, model, feature_embedder, features, linear_net,training=True, model_type='gct'):
+        for i in range(len(self._feature_keys)):
+            if i == len(self._feature_keys) - 1:
+                features[self._feature_keys[i]] = features[self._feature_keys[i]][:,:-1]
+                features['mask'][self._feature_keys[i]] = features['mask'][self._feature_keys[i]][:,:-1]
         embedding_dict, mask_dict = feature_embedder.lookup(
             features, self._max_num_codes)
         pretrain_embedding, pretrain_mask = feature_embedder.getPredict(
@@ -1261,7 +1265,7 @@ class EHRTransformer(object):
         linear_net = linear_net.to(device)
         model = model.to(device)
 
-        state_dict = torch.load(model_path + '/pretrain_model.pth')
+        state_dict = torch.load(model_path + '/pretrain_and_fine_tune_model.pth')
         # linear_net.load_state_dict(state_dict['linear_net'])
         model.load_state_dict(state_dict['model'])
         feature_embedder._embed_model.load_state_dict(state_dict['feature_embedder._embed_model'])
@@ -1321,6 +1325,9 @@ class EHRTransformer(object):
             feature_embedder._embed_model.train()
             model.train()
             run_model(task_type = "train", epoch = epoch, num_class = self._num_classes, dataloader = self._train_data_loader,get_prediction=self.get_prediction, get_loss=self.get_loss, optimizer=optimizer, model=model, feature_embedder=feature_embedder, linear_net=linear_net, max_epoch = result_epoch)
+            torch.save({'model': model.state_dict(), "linear_net": linear_net.state_dict(),
+                            "feature_embedder._embed_model": feature_embedder._embed_model.state_dict()},
+                           model_path + '/pretrain_and_fine_tune_model.pth')
 
     def pretrain_train(self, model_path, use_bert=False):
         feature_embedder = FeatureEmbedding(self._vocab_sizes, self._feature_keys, self._embedding_size, self._use_bert, self._id_2_order_dir, self._id_2_diag_dir)
