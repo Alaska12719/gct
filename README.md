@@ -66,6 +66,14 @@ pretrain采用的MLM算法，随机mask掉一些节点来预测。
 # 5.11更新
 prompt现在需要先经过fine_tune，之后使用fine_tune的结果完成prompt训练。
 
+# 6.16【修改】
+config添加use_position位置编码,可以控制是否开启用来指明诊断类型和治疗类型的不同。
+config添加fine_tune_bert属性，可以控制是否微调bert,如果使用此属性，需要设置cofig文件的use_bert=true
+config中bert_epoches控制微调bert的epoch次数，需要启用fine_tune_bert=true才可以使用
 
+现在新增的任务是mask_predict，如果设置task_type为mask_predict，在训练过程中会打印出在测试集和验证集中的mask节点，和模型的预测结果。
+
+# 9.7修改
+现在除了prompt外都支持打印decode的准确率，打印的是decode预测的结果和原始的分类的比较。
 
 

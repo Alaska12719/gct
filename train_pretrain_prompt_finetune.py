@@ -45,7 +45,7 @@ def main(argv):
       task_type=config["task_type"], #修改这里 prompt，pretrain
       label_key=config["label_key"],
       reg_coef=1.5,
-      vocab_sizes={'dx_ints':config['diag_voclen'] + 1, 'proc_ints':config['order_voclen'] + 1},
+      vocab_sizes={'dx_ints':config['diag_voclen'], 'proc_ints':config['order_voclen']},
       learning_rate=0.00005,
       max_num_codes={'dx':config['diag_max_num'],'px':config['oder_max_num']},
       batch_size=32,
@@ -53,6 +53,9 @@ def main(argv):
       id_2_diag_dir=id_2_diag_dir,
       id_2_order_dir=id_2_order_dir,
       use_bert=config["use_bert"],
+      use_position=config["use_position"],
+      fine_tune_bert=config["fine_tune_bert"],
+      bert_epoches=config["bert_epoches"],
       use_attention=False,#default not modify
       encode=config['model_data_encode'],
       num_classes=config["num_class"],#four classifier

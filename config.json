@@ -12,7 +12,9 @@
     "diag_max_num": 30,
     "oder_max_num": 337,
     "prompt_num": 10,
-    "task_type":"prompt",
+    "task_type":"pretrain",
+    "use_position":false,
+    "bert_epoches":1,
     "diag_voclen": 3917,
     "order_voclen": 3123,
     "use_bert": false,
@@ -21,5 +23,6 @@
     "training": true,
     "label_key": "label.expired",
     "use_inf_mask": false,
-    "epoches": 50
+    "fine_tune_bert": false,
+    "epoches": 500
 }
